@@ -174,7 +174,7 @@ if run:
     st.markdown(diff_html(t_txt, s_txt), unsafe_allow_html=True)
 
     m1, m2, m3 = st.columns(3)
-    m3.metric("Text Similarity",    f"{lev:.2f}")
+    m3.metric("Similarity Score",    f"{lev:.2f}")
     m1.metric("Composite Score", f"{score*100:.1f}%")
     m2.metric("WER",            f"{wer(t_txt, s_txt):.0%}")
 
