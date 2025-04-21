@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+transformers
+montreal-forced-aligner
+librosa
+torch
+numpy
+dtw
+transformers 
+pydub 
+sounddevice 
+epitran 
+scipy 
+soundfile
