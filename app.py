@@ -1,4 +1,3 @@
-
 # app.py
 import os
 import io
@@ -31,7 +30,7 @@ if not st.secrets.get("OPENAI_API_KEY"):
     st.stop()
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
 def whisper_bytes(raw: bytes, lang: str = "he") -> str:
@@ -59,7 +58,8 @@ def load_pcm(raw: bytes, sr: int = 16_000, min_sec: float = 0.5):
         y = y.mean(axis=1)
     if orig_sr != sr:
         logging.info(f"→ load_pcm: resampling {orig_sr}→{sr}")
-        y = librosa.resample(y, orig_sr, sr)
+        # keyword args for newer librosa
+        y = librosa.resample(y, orig_sr=orig_sr, target_sr=sr)
     if len(y) < sr * min_sec:
         pad_amt = int(sr * min_sec) - len(y)
         logging.info(f"→ load_pcm: padding {pad_amt} samples")
@@ -72,30 +72,18 @@ def feats(y: np.ndarray, sr: int = 16_000) -> dict:
     logging.info("→ feats: extracting audio features")
     f = {}
     f["FFT mag"] = float(np.mean(np.abs(np.fft.rfft(y))))
-
-    # single STFT for all spectral moments
     S = np.abs(librosa.stft(y, n_fft=1024, hop_length=256))
-
-    # mel-spectrogram → dB
     melspec = librosa.feature.melspectrogram(
-        y=y, sr=sr,
-        n_fft=1024, hop_length=256,
-        n_mels=64, power=2.0
+        y=y, sr=sr, n_fft=1024, hop_length=256, n_mels=64, power=2.0
     )
     mel_db = librosa.power_to_db(melspec)
     f["Mel (dB)"] = float(np.mean(mel_db))
-
-    # MFCC from mel‑DB
     mfccs = librosa.feature.mfcc(S=mel_db, n_mfcc=13)
     f["MFCC mean"] = float(np.mean(mfccs))
-
-    # spectral moments on the same STFT
     f["Centroid"]  = float(np.mean(librosa.feature.spectral_centroid(S=S, sr=sr)))
     f["Bandwidth"] = float(np.mean(librosa.feature.spectral_bandwidth(S=S, sr=sr)))
     f["Rolloff"]   = float(np.mean(librosa.feature.spectral_rolloff(S=S, sr=sr)))
     f["ZCR"]       = float(np.mean(librosa.feature.zero_crossing_rate(y)))
-
-    # optional pitch (pyin)
     try:
         f0, _, _ = librosa.pyin(
             y,
@@ -107,7 +95,6 @@ def feats(y: np.ndarray, sr: int = 16_000) -> dict:
     except Exception as e:
         logging.warning(f"pyin failed: {e}")
         f["Median f₀ Hz"] = 0.0
-
     logging.info("← feats: done")
     return f
 
@@ -122,7 +109,6 @@ def mfcc_dtw(y1: np.ndarray, y2: np.ndarray, sr: int = 16_000):
     return cost
 
 def diff_html(ref: str, hyp: str) -> str:
-    """Word‑level diff with colorized HTML."""
     out = []
     for seg in ndiff(ref.split(), hyp.split()):
         if seg.startswith("  "):
@@ -132,10 +118,8 @@ def diff_html(ref: str, hyp: str) -> str:
     return " ".join(out)
 
 def mel_fig(y: np.ndarray, sr: int = 16_000):
-    """Render a mel‑spectrogram figure."""
     S = librosa.power_to_db(
-        librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128),
-        ref=np.max
+        librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128), ref=np.max
     )
     fig, ax = plt.subplots(figsize=(5, 3))
     im = ax.imshow(S, origin="lower", aspect="auto", cmap="magma")
@@ -152,22 +136,16 @@ def audio_widget(label: str, col):
     with col:
         st.subheader(label)
         rec = audio_recorder(
-            text=f"Record {label}",
-            icon_size="2x",
-            recording_color="#e91e63",
-            neutral_color="#6c757d",
-            sample_rate=16_000,
-            pause_threshold=2.0
+            text=f"Record {label}", icon_size="2x",
+            recording_color="#e91e63", neutral_color="#6c757d",
+            sample_rate=16_000, pause_threshold=2.0
         )
         up = st.file_uploader(f"or upload {label}", type=["wav","mp3","flac"], key=label)
         if rec:
-            st.audio(rec, format="audio/wav")
-            return rec
+            st.audio(rec, format="audio/wav"); return rec
         if up:
-            st.audio(up)
-            return up.read()
-        st.info(f"Awaiting {label} audio")
-        return None
+            st.audio(up); return up.read()
+        st.info(f"Awaiting {label} audio"); return None
 
 teacher_raw = audio_widget("Teacher", col1)
 student_raw = audio_widget("Student", col2)
@@ -181,42 +159,36 @@ if run:
         t_txt = whisper_bytes(teacher_raw, lang="he")
         s_txt = whisper_bytes(student_raw, lang="he")
 
-        # 2) Load PCM
+        # 2) PCM
         t_y = load_pcm(teacher_raw)
         s_y = load_pcm(student_raw)
 
         # 3) Parallel feats + DTW
         with ThreadPoolExecutor() as pool:
-            f_ref_fut  = pool.submit(feats, t_y)
-            f_stud_fut = pool.submit(feats, s_y)
-            dtw_fut    = pool.submit(mfcc_dtw, t_y, s_y)
-
-            f_ref  = f_ref_fut.result()
-            f_stud = f_stud_fut.result()
-            dtw    = dtw_fut.result()
+            f_ref  = pool.submit(feats, t_y).result()
+            f_stud = pool.submit(feats, s_y).result()
+            dtw    = pool.submit(mfcc_dtw, t_y, s_y).result()
 
         # 4) Metrics
         lev       = 1 - levenshtein_distance(t_txt, s_txt) / max(len(t_txt), len(s_txt), 1)
         wer_val   = wer(t_txt, s_txt)
         per       = levenshtein_distance(t_txt, s_txt) / max(len(t_txt), 1)
         composite = 0.7 * lev + 0.3 * (1 - min(dtw / 100, 1))
-        diff       = {k: abs(f_ref[k] - f_stud[k]) for k in f_ref}
+        diff      = {k: abs(f_ref[k] - f_stud[k]) for k in f_ref}
 
         logging.info("----- ANALYSIS END -----")
 
-    # ─── Render ──────────────────────────────────────────────────────────────
     st.subheader("Transcripts")
-    a, b = st.columns(2)
-    a.write(t_txt); b.write(s_txt)
+    a, b = st.columns(2); a.write(t_txt); b.write(s_txt)
 
     st.subheader("Word‑level diff")
     st.markdown(diff_html(t_txt, s_txt), unsafe_allow_html=True)
 
     st.subheader("Pronunciation Scores")
-    c2, c3, c4 = st.columns(3)
-    c2.metric("Composite 70/30", f"{composite*100:.1f}%")
-    c3.metric("WER",             f"{wer_val:.0%}")
-    c4.metric("PER",             f"{per:.0%}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Composite 70/30", f"{composite*100:.1f}%")
+    c2.metric("WER", f"{wer_val:.0%}")
+    c3.metric("PER", f"{per:.0%}")
 
     st.markdown("#### Audio‑feature differences")
     st.table({k: [f"{v:.2f}"] for k, v in diff.items()})
@@ -225,7 +197,7 @@ if run:
     p, q = st.columns(2)
     p.pyplot(mel_fig(t_y)); q.pyplot(mel_fig(s_y))
 
-    # ─── Download report ───────────────────────────────────────────────────────
+    # CSV report
     csv = "metric,value\n"
     for k, v in {
         **diff,
